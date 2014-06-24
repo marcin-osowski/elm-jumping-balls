@@ -1,4 +1,4 @@
-module ElmGL where
+module JumpingBalls where
 
 import Math.Vector3(..)
 import Math.Matrix4(..)
