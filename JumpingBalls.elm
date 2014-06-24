@@ -4,20 +4,26 @@ import Math.Vector3(..)
 import Math.Matrix4(..)
 import Graphics.WebGL(..)
 import Math.Vector3
+import Graphics.Input
 import Window
 import Mouse
+import Random
 
 {--- Types ---}
 
 type Vertex = { pos:Vec3, col:Vec3, norm:Vec3 }
+type Sphere = { pos:Vec3, vel:Vec3, col:Vec3, radius:Float }
+type Cube = { col:Vec3, edgeWidth:Float }
+
+type GLSLattr = { pos:Vec3, col:Vec3, norm:Vec3 }
+type GLSLunif = { proj:Mat4, modelView:Mat4, lightSrc:Vec3 }
+type GLSLvary = { vcol:Vec3 }
+
+data Keys = AddNew | RemoveAll | Empty
 
 {--- Shaders ---}
 
-vertexShader : Shader
-                { attr | pos:Vec3, col:Vec3, norm:Vec3}
-                { unif | proj:Mat4, modelView:Mat4, lightSrc:Vec3}
-                { vcol:Vec3 }
-
+vertexShader : Shader GLSLattr GLSLunif GLSLvary
 vertexShader = [glsl|
     precision mediump float;
     attribute vec3 pos;
@@ -41,11 +47,7 @@ vertexShader = [glsl|
     }
 |]
 
-fragmentShader : Shader
-                    { }
-                    { unif | proj:Mat4, modelView:Mat4, lightSrc:Vec3 }
-                    { vcol:Vec3 }
-
+fragmentShader : Shader {} GLSLunif GLSLvary
 fragmentShader = [glsl|
     precision mediump float;
     varying vec3 vcol;
@@ -56,13 +58,6 @@ fragmentShader = [glsl|
 |]
 
 {--- Meshes' definitions ---}
-
-triangleMesh : [Triangle Vertex]
-triangleMesh = [
-        (Vertex (vec3 -1.0 -1.0  0.0) (vec3 1.0 0.0 0.0) (vec3 -1.0 -1.0 -5.0),
-         Vertex (vec3  1.0 -1.0  0.0) (vec3 1.0 0.0 0.0) (vec3  1.0 -1.0 -5.0),
-         Vertex (vec3  0.0  1.5  0.0) (vec3 1.0 1.0 0.0) (vec3  0.0  1.5 -5.0))]
-
 
 sphereMesh : Int -> Int -> Vec3 -> [Triangle Vertex]
 sphereMesh latSplits lonSplits col =
@@ -171,25 +166,34 @@ cubeEdge col edgeSize pointA pointB dir =
           Vertex pointB0 col normal,
           Vertex pointB1 col normal)]
 
+{--- Entities' definitions ---}
 
+sphereEntity : GLSLunif -> Sphere -> Entity
+sphereEntity unifs s =
+    let
+        newModelView = scale3 s.radius s.radius s.radius <| translate s.pos <| unifs.modelView
+        newUnifs = { proj=unifs.proj, modelView=newModelView, lightSrc=unifs.lightSrc}
+        mesh = sphereMesh 6 10 s.col
+    in
+        entity vertexShader fragmentShader mesh newUnifs
 
-         
-
-{--- ModelView matrix ---}
-
-translateModelView : Vec3 -> Mat4
-translateModelView = makeTranslate
+cubeEntity : GLSLunif -> Cube -> Entity
+cubeEntity unifs c =
+    let
+        mesh = cubeMesh c.col c.edgeWidth
+    in
+        entity vertexShader fragmentShader mesh unifs
 
 {--- Projection matrix ---}
 
-projScene : (Int, Int) -> (Int, Int) -> Mat4
-projScene (width, height) (xRot, yRot) =
+projMatrix : (Int, Int) -> (Int, Int) -> Mat4
+projMatrix (width, height) (xRot, yRot) =
     let
         fovy = 45.0
         aspect = (toFloat width) / (toFloat height)
         znear = 0.01
         zfar = 100.0
-        eye = vec3 0.0 0.0 -7.0
+        eye = vec3 0.0 0.0 -4.0
         center = vec3 0.0 0.0 0.0
         up = vec3 0.0 1.0 0.0
         yRotAngle = toFloat yRot / 100.0
@@ -204,43 +208,134 @@ projScene (width, height) (xRot, yRot) =
 
 {--- GL Scene ---}
 
-scene : (Int, Int) -> (Int, Int) -> Element
-scene (width, height) (xRot, yRot) =
+scene : (Int, Int) -> (Int, Int) -> [Sphere]-> Element
+scene (width, height) (xRot, yRot) spheres =
     let
-        proj = projScene (width, height) (xRot, yRot)
-        modelView = translateModelView (vec3 0.0 0.0 0.0) 
+        proj = projMatrix (width, height) (xRot, yRot)
+        modelView = identity
         lightSrc = vec3 5.0 5.0 -6.0
-        shadedEntity = entity vertexShader fragmentShader
-        uniforms = { proj=proj, modelView=modelView, lightSrc=lightSrc }
+        unifs = { proj=proj, modelView=modelView, lightSrc=lightSrc }
 
-        triangle = shadedEntity triangleMesh uniforms
-
-        sphereCol = vec3 0.0 0.0 1.0
-        sphere = shadedEntity (sphereMesh 6 10 sphereCol) uniforms
 
         cubeCol = vec3 1.0 1.0 0.0
-        cubeEdgeSize = 0.15
-        cube = shadedEntity (cubeMesh cubeCol cubeEdgeSize) uniforms
+        cubeEdgeWidth = 0.15
+        cube = { col=cubeCol, edgeWidth=cubeEdgeWidth}
+        entities = [cubeEntity unifs cube ] ++ (map (sphereEntity unifs) spheres)
     in
-        webgl (width, height) [{-triangle-} sphere, cube]
+        webgl (width, height) entities
 
-{--- Page layout ---}
+{--- Physics - spheres movement logic ---}
+
+iterSpheres : (Float, Keys, Vec3) -> [Sphere] -> [Sphere]
+iterSpheres (t, k, randVel) spheres =
+    if k == RemoveAll then
+        []
+    else if k == AddNew then
+        spheres ++ [newSphere randVel]
+    else
+        map (iterSphere t) spheres
+
+iterSphere : Float -> Sphere -> Sphere
+iterSphere t s =
+    let
+        pos = add s.pos <| Math.Vector3.scale (t/1000.0) s.vel
+        sphere = { pos=pos, vel=s.vel, col=s.col, radius=s.radius }
+    in
+        bounceSphereCube sphere
+
+bounceSphereCube : Sphere -> Sphere
+bounceSphereCube s =
+    let
+        r = s.radius
+        col = s.col
+
+        (x1, vx1) = bounceAxisCube (getX s.pos) (getX s.vel) r
+        (y1, vy1) = bounceAxisCube (getY s.pos) (getY s.vel) r
+        (z1, vz1) = bounceAxisCube (getZ s.pos) (getZ s.vel) r
+
+        pos = vec3 x1 y1 z1
+        vel = vec3 vx1 vy1 vz1
+    in
+        { pos=pos, vel=vel, col=col, radius=r }
+
+bounceAxisCube : Float -> Float -> Float -> (Float, Float)
+bounceAxisCube x0 v0 r =
+    let
+        (x1, v1) =
+            if x0 + r > 1.0 then
+                (2.0 - x0 - 2.0*r, -v0)
+            else
+                (x0, v0)
+    in
+            if x1 - r < -1.0 then
+                (2.0*r - 2.0 - x1, -v1)
+            else
+                (x1, v1)
+
+newSphere : Vec3 -> Sphere
+newSphere vel = 
+    let
+        col = vec3 0.0 0.0 1.0
+        pos = vec3 0.0 0.0 0.0
+        radius = 0.2
+    in
+        { pos=pos, vel=vel, col=col, radius=radius }
+
+initialSphere : Sphere
+initialSphere = newSphere <| vec3 1.0 0.7 1.3
+
+mergeTimeKeys : Signal Float -> Signal Keys -> Signal (Float, Keys, Vec3)
+mergeTimeKeys time keys =
+    let
+        counter = count keys
+        buildVel x y z = Math.Vector3.sub (vec3 0.5 0.5 0.5)
+                            <| Math.Vector3.scale 3.5
+                            <| vec3 x y z
+        vel = buildVel <~ Random.float keys ~ Random.float keys ~ Random.float keys
+        zipped = (,,,) <~ time ~ keys ~ counter ~ vel
+        folder (time1, keys1, counter1, vel1) (time0, keys0, counter0, vel0) = 
+            if counter0 == counter1 then
+                (time1, Empty, counter1, vel1)
+            else
+                (time1, keys1, counter1, vel1)
+        projection (time, keys, counter, vel) = (time, keys, vel)
+        initState = (0, Empty, 0, (vec3 0.0 0.0 0.0))
+    in
+        projection <~ foldp folder initState zipped
+        
+
+spheres : Signal Float -> Signal Keys -> Signal [Sphere]
+spheres time keys = foldp iterSpheres [initialSphere] <| mergeTimeKeys time keys
+
+{--- Static content ---}
 
 header = [markdown|
-A Web GLSL Demo.
+A Web GLSL Demo. Drag to rotate.
 |]
 
 footer = [markdown|
 &copy; 2014 Marcin Osowski
 |]
 
-content : (Int, Int) -> (Int, Int) -> Element
-content (width, height) (xRot, yRot) =
+{--- Buttons handler ---}
+
+buttonKeys : Graphics.Input.Input Keys
+buttonKeys = Graphics.Input.input Empty
+
+{--- Page layout ---}
+
+layout : (Int, Int) -> (Int, Int) -> [Sphere] -> Element
+layout (width, height) (xRot, yRot) spheres =
     container width height midTop <|
     flow down [
-        spacer 1 25,
+        spacer 1 50,
         header, 
-        color darkCharcoal <| scene (400, 250) (xRot, yRot),
+        color darkCharcoal <| scene (600, 375) (xRot, yRot) spheres,
+        spacer 1 7,
+        flow right [
+            Graphics.Input.button buttonKeys.handle AddNew "Add new",
+            Graphics.Input.button buttonKeys.handle RemoveAll "Remove all"
+        ],
         footer
     ]
 
@@ -250,7 +345,7 @@ content (width, height) (xRot, yRot) =
 mouseRot : Signal (Int, Int)
 mouseRot =
     let
-        mouseDownPosition = lift3 (,,) Mouse.isDown Mouse.x Mouse.y
+        mouseDownPosition = (,,) <~ Mouse.isDown ~ Mouse.x ~ Mouse.y
         mouseDeltaFun (isDown, x2, y2) (x1, y1, xRot, yRot) =
             if isDown then
                 (x2, y2, xRot + x2 - x1, yRot + y2 - y1)
@@ -260,8 +355,8 @@ mouseRot =
         projection (x, y, xRot, yRot) = (xRot, yRot)
 
     in
-        projection <~ foldp mouseDeltaFun (0, 0, 0, 0) mouseDownPosition
+        projection <~ foldp mouseDeltaFun (0, 0, 35, 25) mouseDownPosition
 
 
-main = content <~ Window.dimensions ~ mouseRot
+main = layout <~ Window.dimensions ~ mouseRot ~ spheres (fps 30) buttonKeys.signal
 
