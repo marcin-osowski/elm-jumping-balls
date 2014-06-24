@@ -1,74 +1,95 @@
 module ElmGL where
 
 import Math.Vector3(..)
-import Math.Vector4(..)
 import Math.Matrix4(..)
 import Graphics.WebGL(..)
 import Window
 
-{--- GLSL stuff ---}
+{--- Types ---}
 
-type Vertex = { position:Vec4, color:Vec4 }
+type Vertex = { pos:Vec3, col:Vec3, norm:Vec3 }
 
-triangleVertex : Shader { attr | position:Vec4, color:Vec4 } { unif | view:Mat4 } { vcolor:Vec4 }
-triangleVertex = [glsl|
+{--- Shaders ---}
 
-precision mediump float;
-attribute vec4 position;
-attribute vec4 color;
-uniform mat4 view;
-varying vec4 vcolor;
+vertexShader : Shader
+                { attr | pos:Vec3, col:Vec3, norm:Vec3}
+                { unif | projection:Mat4, modelView:Mat4 }
+                { vcol:Vec3, vnorm:Vec3 }
 
-void main() {
-    gl_Position = view * position;
-    vcolor = color;
-}
+vertexShader = [glsl|
+    precision mediump float;
+    attribute vec3 pos;
+    attribute vec3 col;
+    attribute vec3 norm;
+    uniform mat4 projection;
+    uniform mat4 modelView;
+    varying vec3 vcol;
+    varying vec3 vnorm;
 
+    void main() {
+        gl_Position = projection * modelView * vec4(pos, 1.0);
+        vcol = col;
+        vnorm = norm;
+    }
 |]
 
+fragmentShader : Shader
+                    { }
+                    { unif | projection:Mat4, modelView:Mat4 }
+                    { vcol:Vec3, vnorm:Vec3 }
 
-triangleFragment : Shader {} { unif | view:Mat4 } { vcolor:Vec4 }
-triangleFragment = [glsl|
+fragmentShader = [glsl|
+    precision mediump float;
+    varying vec3 vcol;
+    varying vec3 vnorm;
 
-precision mediump float;
-uniform mat4 view;
-varying vec4 vcolor;
-
-void main() {
-    gl_FragColor = vec4(1.0, 0.0, 0.0, 1.0); //vcolor;
-}
-
+    void main() {
+        gl_FragColor = vec4(vcol, 1.0);
+    }
 |]
+
+{--- Meshes' definitions ---}
 
 triangleMesh : [Triangle Vertex]
 triangleMesh = [
-        (Vertex (vec4 -1.0 -1.0  0.0  1.0) (vec4 1.0 0.0 0.0 1.0),
-         Vertex (vec4  1.0 -1.0  0.0  1.0) (vec4 1.0 0.0 0.0 1.0),
-         Vertex (vec4  0.0  1.5  0.0  1.0) (vec4 1.0 0.0 0.0 1.0))]
+        (Vertex (vec3 -1.0 -1.0  0.0) (vec3 1.0 0.0 0.0) (vec3 0.0 0.0 -1.0),
+         Vertex (vec3  1.0 -1.0  0.0) (vec3 1.0 0.0 0.0) (vec3 0.0 0.0 -1.0),
+         Vertex (vec3  0.0  1.5  0.0) (vec3 1.0 1.0 0.0) (vec3 0.0 0.0 -1.0))]
 
-triangle : Mat4 -> Entity
-triangle view = entity triangleVertex triangleFragment triangleMesh { view = view }
+triangle : Mat4 -> Mat4 -> Entity
+triangle projection modelView = entity vertexShader fragmentShader triangleMesh
+                                { projection = projection, modelView = modelView }
 
-sceneView : (Int, Int) -> Float -> Mat4
-sceneView (width, height) t =
+{--- ModelView matrices ---}
+
+rotatingModelView : Float -> Mat4
+rotatingModelView time = makeRotate (time * 0.001) (vec3 0.0 0.0 1.0)
+
+
+{--- Projection matrix ---}
+
+projectionScene : (Int, Int) -> Mat4
+projectionScene (width, height) =
     let
-        perspectiveAngle = 45.0
-        proportions = (toFloat width) / (toFloat height)
-        minDepth = 0.01
-        maxDepth = 100.0
+        fovy = 45.0
+        aspect = (toFloat width) / (toFloat height)
+        znear = 0.01
+        zfar = 100.0
         eye = vec3 0.0 0.0 -5.0
         center = vec3 0.0 0.0 0.0
-        up = vec3 (sin (t/1000.0)) (cos (t/1000.0)) 0.0
+        up = vec3 0.0 1.0 0.0
     in
-        mul (makePerspective perspectiveAngle proportions minDepth maxDepth)
-            (makeLookAt eye center up)
+        (makePerspective fovy aspect znear zfar) `mul` (makeLookAt eye center up)
+
+{--- GL Scene ---}
 
 scene : (Int, Int) -> Float -> Element
-scene (width, height) t =
+scene (width, height) time =
     let
-        view = sceneView (width, height) t
+        projection = projectionScene (width, height)
+        modelView = rotatingModelView time
     in
-        webgl (width, height) [triangle view]
+        webgl (width, height) [triangle projection modelView]
 
 {--- Page layout ---}
 
@@ -81,12 +102,12 @@ footer = [markdown|
 |]
 
 content : (Int, Int) -> Float -> Element
-content (width, height) t =
+content (width, height) time =
     container width height midTop <|
     flow down [
         spacer 1 25,
         header, 
-        color darkCharcoal <| scene (450, 300) t,
+        color darkCharcoal <| scene (450, 300) time,
         footer
     ]
 
@@ -94,7 +115,7 @@ content (width, height) t =
 {--- Main ---}
 
 time : Signal Float
-time = foldp (+) 0.0 (fps 15)
+time = foldp (+) 0.0 (fps 5)
 
 main = content <~ Window.dimensions ~ time
 
