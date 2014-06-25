@@ -181,7 +181,7 @@ sphereEntity unifs s =
         newModelView = scale3 s.radius s.radius s.radius <| translate s.pos <| unifs.modelView
         newUnifs = { proj=unifs.proj, modelView=newModelView,
                      lightSrc=unifs.lightSrc, symmLight=0.0 }
-        mesh = sphereMesh 10 14 s.col
+        mesh = sphereMesh 10 13 s.col
     in
         entity vertexShader fragmentShader mesh newUnifs
 
@@ -286,33 +286,44 @@ bounceAxisCube x0 v0 r =
                 (x1, v1)
 
 bounceSphereSpheres : [Sphere] -> Sphere -> Sphere
-bounceSphereSpheres spheres sphere = foldl bounceSphereSphere sphere spheres
+bounceSphereSpheres spheres sphere =
+    let
+        zeroVec = vec3 0.0 0.0 0.0
+        (dpos, dvel) = foldl (bounceSphereSphere sphere) (zeroVec, zeroVec) spheres
+        newPos = Math.Vector3.add sphere.pos dpos
+        newVel = Math.Vector3.add sphere.vel dvel
+    in
+        { pos=newPos, vel=newVel, col=sphere.col, radius=sphere.radius }
+        
 
-bounceSphereSphere : Sphere -> Sphere -> Sphere
-bounceSphereSphere other this =
+bounceSphereSphere : Sphere -> Sphere -> (Vec3, Vec3) -> (Vec3, Vec3)
+bounceSphereSphere this other (dpos, dvel) =
     let
         dir = Math.Vector3.sub other.pos this.pos
         dist = Math.Vector3.length dir
         radiusSum = this.radius + other.radius
     in
         if dist < 1e-7 then
-            this
+            (dpos, dvel)
         else if dist > radiusSum then
-            this
+            (dpos, dvel)
         else
             let
                 normDir = Math.Vector3.scale (1.0/dist) dir
-                deltaPos = Math.Vector3.scale ((radiusSum - dist) * -0.5) dir
+
+                deltaPosVal = (dist - radiusSum) * 0.5
+                deltaPos = Math.Vector3.scale deltaPosVal normDir
+
                 deltaVel1Val = -(Math.Vector3.dot this.vel normDir)
                 deltaVel2Val = Math.Vector3.dot other.vel normDir
                 deltaVel1 = Math.Vector3.scale deltaVel1Val normDir
                 deltaVel2 = Math.Vector3.scale deltaVel2Val normDir
                 deltaVel = Math.Vector3.add deltaVel1 deltaVel2
 
-                newPos = Math.Vector3.add this.pos deltaPos
-                newVel = Math.Vector3.add this.vel deltaVel
+                newDPos = Math.Vector3.add deltaPos dpos
+                newDVel = Math.Vector3.add deltaVel dvel
             in
-                { pos=newPos, vel=newVel, col=this.col, radius=this.radius }
+                (newDPos, newDVel)
 
 
 newSphere : Vec3 -> Int -> Sphere
@@ -330,7 +341,7 @@ newSphere vel colIdx =
             else
                 vec3 0.008 0.494 0.541
         pos = vec3 0.0 0.0 0.0
-        radius = 0.30
+        radius = 0.20
     in
         { pos=pos, vel=vel, col=col, radius=radius }
 
@@ -342,7 +353,7 @@ mergeTimeKeys time keys =
     let
         counter = count keys
         buildVel x y z = Math.Vector3.sub (vec3 0.5 0.5 0.5)
-                            <| Math.Vector3.scale 3.5
+                            <| Math.Vector3.scale 2.5
                             <| vec3 x y z
         vel = buildVel <~ Random.float keys ~ Random.float keys ~ Random.float keys
         col = Random.range 0 4 keys
