@@ -16,7 +16,7 @@ type Sphere = { pos:Vec3, vel:Vec3, col:Vec3, radius:Float }
 type Cube = { col:Vec3, edgeWidth:Float }
 
 type GLSLattr = { pos:Vec3, col:Vec3, norm:Vec3 }
-type GLSLunif = { proj:Mat4, modelView:Mat4, lightSrc:Vec3 }
+type GLSLunif = { proj:Mat4, modelView:Mat4, lightSrc:Vec3, symmLight:Float }
 type GLSLvary = { vcol:Vec3 }
 
 data Keys = AddNew | RemoveAll | Empty
@@ -32,16 +32,23 @@ vertexShader = [glsl|
     uniform mat4 proj;
     uniform mat4 modelView;
     uniform vec3 lightSrc;
+    uniform float symmLight;
     varying vec3 vcol;
 
     void main() {
         vec4 afterModelView = modelView * vec4(pos, 1.0);
         vec3 toLightSrc = lightSrc - afterModelView.xyz;
-        float intensity = dot(normalize(toLightSrc), normalize(norm));
+        float intensity = 1.25 * dot(normalize(toLightSrc), normalize(norm));
+        if(intensity < 0.0) {
+            intensity = -symmLight * intensity;
+        }
         if(intensity < 0.2) {
             intensity = 0.2;
         }
-        
+        if(intensity > 1.0) {
+            intensity = 1.0;
+        }
+
         gl_Position = proj * afterModelView;
         vcol = col * intensity;
     }
@@ -172,8 +179,9 @@ sphereEntity : GLSLunif -> Sphere -> Entity
 sphereEntity unifs s =
     let
         newModelView = scale3 s.radius s.radius s.radius <| translate s.pos <| unifs.modelView
-        newUnifs = { proj=unifs.proj, modelView=newModelView, lightSrc=unifs.lightSrc}
-        mesh = sphereMesh 6 10 s.col
+        newUnifs = { proj=unifs.proj, modelView=newModelView,
+                     lightSrc=unifs.lightSrc, symmLight=0.0 }
+        mesh = sphereMesh 10 14 s.col
     in
         entity vertexShader fragmentShader mesh newUnifs
 
@@ -181,8 +189,10 @@ cubeEntity : GLSLunif -> Cube -> Entity
 cubeEntity unifs c =
     let
         mesh = cubeMesh c.col c.edgeWidth
+        newUnifs = { proj=unifs.proj, modelView=unifs.modelView,
+                     lightSrc=unifs.lightSrc, symmLight=0.8 }
     in
-        entity vertexShader fragmentShader mesh unifs
+        entity vertexShader fragmentShader mesh newUnifs
 
 {--- Projection matrix ---}
 
@@ -213,35 +223,38 @@ scene (width, height) (xRot, yRot) spheres =
     let
         proj = projMatrix (width, height) (xRot, yRot)
         modelView = identity
-        lightSrc = vec3 5.0 5.0 -6.0
-        unifs = { proj=proj, modelView=modelView, lightSrc=lightSrc }
-
+        lightSrc = vec3 4.0 5.0 -6.0
+        unifs = { proj=proj, modelView=modelView, lightSrc=lightSrc, symmLight=0.0 }
 
         cubeCol = vec3 1.0 1.0 0.0
         cubeEdgeWidth = 0.15
         cube = { col=cubeCol, edgeWidth=cubeEdgeWidth}
-        entities = [cubeEntity unifs cube ] ++ (map (sphereEntity unifs) spheres)
+        entities = [cubeEntity unifs cube] ++ (map (sphereEntity unifs) spheres)
     in
         webgl (width, height) entities
 
 {--- Physics - spheres movement logic ---}
 
-iterSpheres : (Float, Keys, Vec3) -> [Sphere] -> [Sphere]
-iterSpheres (t, k, randVel) spheres =
+iterSpheres : (Float, Keys, Vec3, Int) -> [Sphere] -> [Sphere]
+iterSpheres (dt, k, randVel, col) spheres =
     if k == RemoveAll then
         []
     else if k == AddNew then
-        spheres ++ [newSphere randVel]
+        spheres ++ [newSphere randVel col]
     else
-        map (iterSphere t) spheres
+        let
+            newSpheres = map (iterSphere dt spheres) spheres
+        in
+            map (bounceSphereCube . bounceSphereSpheres newSpheres) newSpheres
 
-iterSphere : Float -> Sphere -> Sphere
-iterSphere t s =
+
+iterSphere : Float -> [Sphere] -> Sphere -> Sphere
+iterSphere dt spheres s =
     let
-        pos = add s.pos <| Math.Vector3.scale (t/1000.0) s.vel
+        pos = add s.pos <| Math.Vector3.scale (dt/1000.0) s.vel
         sphere = { pos=pos, vel=s.vel, col=s.col, radius=s.radius }
     in
-        bounceSphereCube sphere
+        sphere
 
 bounceSphereCube : Sphere -> Sphere
 bounceSphereCube s =
@@ -272,19 +285,59 @@ bounceAxisCube x0 v0 r =
             else
                 (x1, v1)
 
-newSphere : Vec3 -> Sphere
-newSphere vel = 
+bounceSphereSpheres : [Sphere] -> Sphere -> Sphere
+bounceSphereSpheres spheres sphere = foldl bounceSphereSphere sphere spheres
+
+bounceSphereSphere : Sphere -> Sphere -> Sphere
+bounceSphereSphere other this =
     let
-        col = vec3 0.0 0.0 1.0
+        dir = Math.Vector3.sub other.pos this.pos
+        dist = Math.Vector3.length dir
+        radiusSum = this.radius + other.radius
+    in
+        if dist < 1e-7 then
+            this
+        else if dist > radiusSum then
+            this
+        else
+            let
+                normDir = Math.Vector3.scale (1.0/dist) dir
+                deltaPos = Math.Vector3.scale ((radiusSum - dist) * -0.5) dir
+                deltaVel1Val = -(Math.Vector3.dot this.vel normDir)
+                deltaVel2Val = Math.Vector3.dot other.vel normDir
+                deltaVel1 = Math.Vector3.scale deltaVel1Val normDir
+                deltaVel2 = Math.Vector3.scale deltaVel2Val normDir
+                deltaVel = Math.Vector3.add deltaVel1 deltaVel2
+
+                newPos = Math.Vector3.add this.pos deltaPos
+                newVel = Math.Vector3.add this.vel deltaVel
+            in
+                { pos=newPos, vel=newVel, col=this.col, radius=this.radius }
+
+
+newSphere : Vec3 -> Int -> Sphere
+newSphere vel colIdx =
+    let
+        col =
+            if colIdx == 0 then
+                vec3 0.973 0.075 0.000
+            else if colIdx == 1 then
+                vec3 0.941 0.486 0.020
+            else if colIdx == 2 then
+                vec3 0.894 0.722 0.000
+            else if colIdx == 3 then
+                vec3 0.071 0.545 0.039
+            else
+                vec3 0.008 0.494 0.541
         pos = vec3 0.0 0.0 0.0
-        radius = 0.2
+        radius = 0.15
     in
         { pos=pos, vel=vel, col=col, radius=radius }
 
 initialSphere : Sphere
-initialSphere = newSphere <| vec3 1.0 0.7 1.3
+initialSphere = newSphere (vec3 1.0 0.7 1.3) 4
 
-mergeTimeKeys : Signal Float -> Signal Keys -> Signal (Float, Keys, Vec3)
+mergeTimeKeys : Signal Float -> Signal Keys -> Signal (Float, Keys, Vec3, Int)
 mergeTimeKeys time keys =
     let
         counter = count keys
@@ -292,14 +345,15 @@ mergeTimeKeys time keys =
                             <| Math.Vector3.scale 3.5
                             <| vec3 x y z
         vel = buildVel <~ Random.float keys ~ Random.float keys ~ Random.float keys
-        zipped = (,,,) <~ time ~ keys ~ counter ~ vel
-        folder (time1, keys1, counter1, vel1) (time0, keys0, counter0, vel0) = 
+        col = Random.range 0 4 keys
+        zipped = (,,,,) <~ time ~ keys ~ counter ~ vel  ~ col
+        folder (time1, keys1, counter1, vel1, col1) (time0, keys0, counter0, vel0, col0) = 
             if counter0 == counter1 then
-                (time1, Empty, counter1, vel1)
+                (time1, Empty, counter1, vel1, col1)
             else
-                (time1, keys1, counter1, vel1)
-        projection (time, keys, counter, vel) = (time, keys, vel)
-        initState = (0, Empty, 0, (vec3 0.0 0.0 0.0))
+                (time1, keys1, counter1, vel1, col1)
+        projection (time, keys, counter, vel, col) = (time, keys, vel, col)
+        initState = (0, Empty, 0, (vec3 0.0 0.0 0.0), 0)
     in
         projection <~ foldp folder initState zipped
         
@@ -310,7 +364,7 @@ spheres time keys = foldp iterSpheres [initialSphere] <| mergeTimeKeys time keys
 {--- Static content ---}
 
 header = [markdown|
-A Web GLSL Demo. Drag to rotate.
+A Web GL Demo. Drag to rotate.
 |]
 
 footer = [markdown|
