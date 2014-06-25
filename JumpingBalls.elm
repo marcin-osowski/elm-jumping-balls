@@ -330,7 +330,7 @@ newSphere vel colIdx =
             else
                 vec3 0.008 0.494 0.541
         pos = vec3 0.0 0.0 0.0
-        radius = 0.15
+        radius = 0.30
     in
         { pos=pos, vel=vel, col=col, radius=radius }
 
